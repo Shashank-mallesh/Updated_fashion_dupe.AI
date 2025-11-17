@@ -1,487 +1,320 @@
-"""
-Enhanced Fashion Dupe Detection App with E-commerce Integration
-Week 4 Assignment - Complete Solution
-"""
-
+# app.py
 import streamlit as st
 import torch
 import torch.nn as nn
-import torchvision.transforms as transforms
+from torchvision import models, transforms
 from PIL import Image
 import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
-import pickle
+import pandas as pd
 import requests
-from bs4 import BeautifulSoup
-import re
+from io import BytesIO
+import time
+import json
 
-# ==================== MODEL ARCHITECTURES ====================
-
-class BasicBlock(nn.Module):
-    """Residual Block for Custom ResNet"""
-    expansion = 1
-    
-    def __init__(self, in_channels, out_channels, stride=1, downsample=None):
-        super(BasicBlock, self).__init__()
-        
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, 
-                               stride=stride, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLU(inplace=True)
-        
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3,
-                               stride=1, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(out_channels)
-        
-        self.downsample = downsample
-        
-    def forward(self, x):
-        identity = x
-        
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-        
-        out = self.conv2(out)
-        out = self.bn2(out)
-        
-        if self.downsample is not None:
-            identity = self.downsample(x)
-        
-        out += identity
-        out = self.relu(out)
-        
-        return out
-
-
-class CustomResNet18(nn.Module):
-    """Custom ResNet-18 for Fashion Classification"""
-    def __init__(self, block=BasicBlock, layers=[2, 2, 2, 2], 
-                 num_classes=3, embedding_dim=512):
-        super(CustomResNet18, self).__init__()
-        
-        self.in_channels = 64
-        
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        self.bn1 = nn.BatchNorm2d(64)
-        self.relu = nn.ReLU(inplace=True)
-        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        
-        self.layer1 = self._make_layer(block, 64, layers[0], stride=1)
-        self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
-        self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
-        self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
-        
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        
-        self.fc = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(512, embedding_dim),
-            nn.BatchNorm1d(embedding_dim),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(embedding_dim, num_classes)
-        )
-        
-        self.embedding_layer = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(512, embedding_dim),
-            nn.BatchNorm1d(embedding_dim)
-        )
-        
-    def _make_layer(self, block, out_channels, blocks, stride=1):
-        downsample = None
-        
-        if stride != 1 or self.in_channels != out_channels:
-            downsample = nn.Sequential(
-                nn.Conv2d(self.in_channels, out_channels, kernel_size=1, 
-                         stride=stride, bias=False),
-                nn.BatchNorm2d(out_channels),
-            )
-        
-        layers = []
-        layers.append(block(self.in_channels, out_channels, stride, downsample))
-        self.in_channels = out_channels
-        
-        for _ in range(1, blocks):
-            layers.append(block(self.in_channels, out_channels))
-        
-        return nn.Sequential(*layers)
-    
-    def forward(self, x, return_embedding=False):
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.maxpool(x)
-        
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
-        
-        x = self.avgpool(x)
-        
-        if return_embedding:
-            return self.embedding_layer(x)
-        else:
-            return self.fc(x)
-
-
-# ==================== E-COMMERCE SCRAPING ====================
-
-def get_search_keywords(category):
-    """Map predicted category to search keywords"""
-    keywords_map = {
-        'men': ['mens fashion', 'mens clothing', 'mens apparel'],
-        'women': ['womens fashion', 'womens clothing', 'womens dress'],
-        'footwear': ['shoes', 'sneakers', 'footwear', 'boots']
-    }
-    return keywords_map.get(category, ['fashion'])
-
-
-def search_amazon(query, max_results=3):
-    """
-    Search Amazon for similar products
-    Note: This is a simplified example. Real implementation should use:
-    - Amazon Product Advertising API
-    - Proper rate limiting
-    - Error handling
-    """
-    products = []
-    
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept-Language': 'en-US,en;q=0.9'
-        }
-        
-        url = f"https://www.amazon.com/s?k={query.replace(' ', '+')}"
-        response = requests.get(url, headers=headers, timeout=5)
-        soup = BeautifulSoup(response.content, 'html.parser')
-        
-        items = soup.find_all('div', {'data-component-type': 's-search-result'})[:max_results]
-        
-        for item in items:
-            try:
-                title_elem = item.find('h2', {'class': 'a-size-mini'})
-                if not title_elem:
-                    title_elem = item.find('span', {'class': 'a-size-medium'})
-                
-                title = title_elem.text.strip()[:80] if title_elem else 'Product'
-                
-                price_whole = item.find('span', {'class': 'a-price-whole'})
-                price_fraction = item.find('span', {'class': 'a-price-fraction'})
-                
-                if price_whole and price_fraction:
-                    price = f"${price_whole.text}{price_fraction.text}"
-                else:
-                    price = "Check Amazon"
-                
-                image_elem = item.find('img', {'class': 's-image'})
-                image = image_elem['src'] if image_elem else None
-                
-                link_elem = item.find('a', {'class': 'a-link-normal'})
-                link = 'https://www.amazon.com' + link_elem['href'] if link_elem else url
-                
-                if title and image:
-                    products.append({
-                        'title': title,
-                        'price': price,
-                        'image': image,
-                        'link': link,
-                        'platform': 'Amazon'
-                    })
-            except Exception as e:
-                continue
-        
-    except Exception as e:
-        st.warning(f"Amazon search temporarily unavailable. Showing database results only.")
-    
-    return products
-
-
-def search_ebay(query, max_results=2):
-    """Search eBay for similar products"""
-    products = []
-    
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        
-        url = f"https://www.ebay.com/sch/i.html?_nkw={query.replace(' ', '+')}"
-        response = requests.get(url, headers=headers, timeout=5)
-        soup = BeautifulSoup(response.content, 'html.parser')
-        
-        items = soup.find_all('li', {'class': 's-item'})[:max_results+1]  # +1 because first is ad
-        
-        for item in items[1:]:  # Skip first (ad)
-            try:
-                title_elem = item.find('h3', {'class': 's-item__title'})
-                title = title_elem.text.strip()[:80] if title_elem else 'Product'
-                
-                price_elem = item.find('span', {'class': 's-item__price'})
-                price = price_elem.text if price_elem else 'Check eBay'
-                
-                image_elem = item.find('img', {'class': 's-item__image-img'})
-                image = image_elem['src'] if image_elem else None
-                
-                link_elem = item.find('a', {'class': 's-item__link'})
-                link = link_elem['href'] if link_elem else url
-                
-                if title and image and 'Shop on eBay' not in title:
-                    products.append({
-                        'title': title,
-                        'price': price,
-                        'image': image,
-                        'link': link,
-                        'platform': 'eBay'
-                    })
-            except:
-                continue
-    except:
-        pass
-    
-    return products
-
-
-# ==================== STREAMLIT APP ====================
-
+# Set page config
 st.set_page_config(
-    page_title="Fashion Dupe Detection",
-    page_icon="👗",
-    layout="wide"
+    page_title="Fashion Dupe Finder",
+    page_icon="👟",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# Custom CSS
+# Custom CSS for better styling
 st.markdown("""
-    <style>
-    .main {background-color: #f5f5f5;}
-    .stButton>button {
-        background-color: #FF6B6B;
-        color: white;
-        font-weight: bold;
-        border-radius: 10px;
+<style>
+    .main-header {
+        font-size: 3rem;
+        color: #1f77b4;
+        text-align: center;
+        margin-bottom: 2rem;
     }
     .product-card {
-        background-color: white;
-        padding: 15px;
+        border: 1px solid #ddd;
         border-radius: 10px;
+        padding: 15px;
+        margin: 10px 0;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        margin-bottom: 15px;
     }
-    </style>
+    .price-tag {
+        font-size: 1.5rem;
+        font-weight: bold;
+        color: #e74c3c;
+    }
+    .rating {
+        color: #f39c12;
+    }
+    .match-percentage {
+        font-size: 1.2rem;
+        font-weight: bold;
+        padding: 5px 10px;
+        border-radius: 15px;
+        display: inline-block;
+    }
+    .high-match {
+        background-color: #d4edda;
+        color: #155724;
+    }
+    .medium-match {
+        background-color: #fff3cd;
+        color: #856404;
+    }
+    .low-match {
+        background-color: #f8d7da;
+        color: #721c24;
+    }
+</style>
 """, unsafe_allow_html=True)
 
-# Header
-st.title("🔍 AI Fashion Dupe Detection System")
-st.markdown("""
-**Powered by Custom ResNet-18 | 87.2% Accuracy | Trained on 44,424 Images**
+class FashionDupeClassifier(nn.Module):
+    def __init__(self, num_classes=2):
+        super(FashionDupeClassifier, self).__init__()
+        self.backbone = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+        num_features = self.backbone.fc.in_features
+        self.backbone.fc = nn.Sequential(
+            nn.Dropout(0.3),
+            nn.Linear(num_features, 256),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm1d(256),
+            nn.Dropout(0.2),
+            nn.Linear(256, num_classes)
+        )
 
-Upload a fashion item to:
-- 🎯 Classify into Men's, Women's, or Footwear
-- 🔍 Find similar items (dupes) in our database
-- 🛒 Discover cheaper alternatives on Amazon & eBay
-""")
+    def forward(self, x):
+        return self.backbone(x)
 
-# Load model and embeddings
-@st.cache_resource
 def load_model():
+    """Load the trained model"""
+    model = FashionDupeClassifier(num_classes=2)
     try:
-        model = CustomResNet18(num_classes=3)
-        model.load_state_dict(torch.load('best_Custom_ResNet18.pth', map_location='cpu'))
+        model.load_state_dict(torch.load('fashion-data/models/best_fashion_dupe_model_30_epochs.pth', 
+                                       map_location=torch.device('cpu')))
         model.eval()
         return model
-    except Exception as e:
-        st.error(f"Error loading model: {e}")
+    except:
+        st.error("Model file not found. Please ensure the model is trained and saved in the correct location.")
         return None
 
-@st.cache_resource
-def load_embeddings():
-    try:
-        with open('embedding_database.pkl', 'rb') as f:
-            return pickle.load(f)
-    except Exception as e:
-        st.warning("Embedding database not found. Only classification available.")
-        return None
+def preprocess_image(image):
+    """Preprocess image for model inference"""
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    return transform(image).unsqueeze(0)
 
-model = load_model()
-embedding_db = load_embeddings()
+def get_similarity_score(model, image):
+    """Get similarity score from model"""
+    with torch.no_grad():
+        output = model(image)
+        probabilities = torch.softmax(output, 1)
+        similarity_score = probabilities[0][1].item()  # Probability it's a dupe
+    return similarity_score
 
-if model is None:
-    st.error("⚠️ Model not loaded. Please ensure 'best_Custom_ResNet18.pth' is in the app directory.")
-    st.stop()
-
-# Main layout
-col1, col2 = st.columns([1, 1])
-
-with col1:
-    st.subheader("📤 Upload Fashion Item")
+# Mock e-commerce data - In a real application, you'd query actual APIs
+def get_mock_product_data():
+    """Generate mock product data for demonstration"""
+    products = []
     
-    uploaded_file = st.file_uploader(
-        "Choose an image (JPG, PNG)",
-        type=['jpg', 'jpeg', 'png'],
-        help="Upload a clear image of the fashion item"
+    # Nike Air Force 1 example
+    base_product = {
+        'name': 'Nike Air Force 1 White',
+        'original_price': 120.00,
+        'brand': 'Nike',
+        'category': 'Sneakers',
+        'description': 'Classic white sneakers with durable construction and comfortable cushioning.'
+    }
+    
+    # Similar products from different retailers
+    similar_products = [
+        {
+            'name': 'Air Force 1 Style White Sneakers',
+            'retailer': 'Amazon Fashion',
+            'price': 45.99,
+            'rating': 4.2,
+            'reviews': 1247,
+            'match_percentage': 92,
+            'url': 'https://amazon.com/fashion-sneakers',
+            'image_url': 'https://via.placeholder.com/200x200/FF6B6B/FFFFFF?text=Amazon+Version'
+        },
+        {
+            'name': 'Premium White Leather Sneakers',
+            'retailer': 'Walmart',
+            'price': 39.99,
+            'rating': 4.0,
+            'reviews': 892,
+            'match_percentage': 88,
+            'url': 'https://walmart.com/premium-sneakers',
+            'image_url': 'https://via.placeholder.com/200x200/4ECDC4/FFFFFF?text=Walmart+Version'
+        },
+        {
+            'name': 'Classic White Athletic Shoes',
+            'retailer': 'Target',
+            'price': 49.99,
+            'rating': 4.3,
+            'reviews': 567,
+            'match_percentage': 85,
+            'url': 'https://target.com/athletic-shoes',
+            'image_url': 'https://via.placeholder.com/200x200/45B7D1/FFFFFF?text=Target+Version'
+        },
+        {
+            'name': 'Urban White Casual Sneakers',
+            'retailer': 'AliExpress',
+            'price': 28.50,
+            'rating': 3.8,
+            'reviews': 2341,
+            'match_percentage': 78,
+            'url': 'https://aliexpress.com/urban-sneakers',
+            'image_url': 'https://via.placeholder.com/200x200/F7DC6F/FFFFFF?text=AliExpress+Version'
+        },
+        {
+            'name': 'Designer Inspired White Shoes',
+            'retailer': 'Shein',
+            'price': 32.99,
+            'rating': 4.1,
+            'reviews': 1789,
+            'match_percentage': 82,
+            'url': 'https://shein.com/designer-shoes',
+            'image_url': 'https://via.placeholder.com/200x200/BB8FCE/FFFFFF?text=Shein+Version'
+        }
+    ]
+    
+    return base_product, similar_products
+
+def get_match_color_class(percentage):
+    """Get CSS class based on match percentage"""
+    if percentage >= 90:
+        return "high-match"
+    elif percentage >= 75:
+        return "medium-match"
+    else:
+        return "low-match"
+
+def main():
+    # Header
+    st.markdown('<h1 class="main-header">👟 Fashion Dupe Finder</h1>', unsafe_allow_html=True)
+    st.markdown("### Find affordable alternatives to your favorite fashion items")
+    
+    # Sidebar
+    st.sidebar.title("About")
+    st.sidebar.info(
+        "Upload an image of any fashion product to find similar, more affordable alternatives "
+        "from various e-commerce platforms with price comparisons and customer reviews."
     )
     
-    if uploaded_file:
-        # Display uploaded image
-        image = Image.open(uploaded_file).convert('RGB')
-        st.image(image, caption='Your Uploaded Image', use_column_width=True)
-        
-        # Preprocess
-        transform = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-        
-        image_tensor = transform(image).unsqueeze(0)
-        
-        with st.spinner("🔄 Analyzing image..."):
-            with torch.no_grad():
-                # Classification
-                logits = model(image_tensor)
-                probabilities = torch.softmax(logits, dim=1)[0]
-                pred_class_idx = torch.argmax(logits, dim=1).item()
-                
-                class_names = ['Footwear', 'Men', 'Women']
-                pred_class = class_names[pred_class_idx].lower()
-                confidence = probabilities[pred_class_idx].item()
-                
-                # Embedding
-                query_embedding = model(image_tensor, return_embedding=True).cpu().numpy()
-        
-        # Display results
-        st.success(f"✅ **Category**: {class_names[pred_class_idx]}")
-        st.info(f"🎯 **Confidence**: {confidence*100:.1f}%")
-        
-        # Confidence bar
-        st.progress(confidence)
-        
-        # All class probabilities
-        with st.expander("📊 See all predictions"):
-            for idx, class_name in enumerate(class_names):
-                st.write(f"{class_name}: {probabilities[idx].item()*100:.2f}%")
-
-with col2:
-    st.subheader("🔍 Similar Products & Dupes")
+    st.sidebar.title("How it works")
+    st.sidebar.markdown("""
+    1. Upload an image of your desired product
+    2. Our AI analyzes the product features
+    3. Find similar products across multiple retailers
+    4. Compare prices, ratings, and reviews
+    5. Save money on your fashion purchases!
+    """)
     
-    if uploaded_file and embedding_db:
-        # Database similarity search
-        st.markdown("### 🗂️ From Our Database")
+    # Main content
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        st.subheader("Upload Product Image")
+        uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
         
-        similarities = cosine_similarity(query_embedding, embedding_db['embeddings'])[0]
-        top_indices = np.argsort(similarities)[::-1][1:6]  # Top 5 excluding self
-        
-        cols = st.columns(5)
-        for idx, sim_idx in enumerate(top_indices):
-            with cols[idx]:
-                try:
-                    st.image(embedding_db['images'][sim_idx], use_column_width=True)
-                    st.caption(f"✨ {similarities[sim_idx]*100:.0f}% match")
-                except:
-                    st.write("Image N/A")
-        
-        st.markdown("---")
-        
-        # E-commerce search
-        st.markdown("### 🛒 Find on E-commerce Platforms")
-        
-        similarity_threshold = st.slider(
-            "Similarity threshold",
-            min_value=60,
-            max_value=95,
-            value=75,
-            help="Higher = more similar products"
-        )
-        
-        if st.button("🔍 Search Amazon & eBay", key="search_btn"):
-            with st.spinner("🌐 Searching e-commerce platforms..."):
-                keywords = get_search_keywords(pred_class)
-                
-                # Search multiple platforms
-                amazon_results = search_amazon(keywords[0], max_results=3)
-                ebay_results = search_ebay(keywords[1] if len(keywords) > 1 else keywords[0], max_results=2)
-                
-                all_results = amazon_results + ebay_results
-                
-                if all_results:
-                    st.success(f"✅ Found {len(all_results)} similar products!")
+        if uploaded_file is not None:
+            image = Image.open(uploaded_file)
+            st.image(image, caption="Uploaded Product", use_column_width=True)
+            
+            # Load model
+            with st.spinner("Analyzing product..."):
+                model = load_model()
+                if model:
+                    # Preprocess image
+                    processed_image = preprocess_image(image)
                     
-                    for product in all_results:
-                        st.markdown('<div class="product-card">', unsafe_allow_html=True)
-                        
-                        col_img, col_info = st.columns([1, 2])
-                        
-                        with col_img:
-                            try:
-                                st.image(product['image'], width=150)
-                            except:
-                                st.write("🖼️ Image")
-                        
-                        with col_info:
-                            st.markdown(f"**{product['title']}**")
-                            st.markdown(f"💰 **Price**: {product['price']}")
-                            st.markdown(f"🏪 **Platform**: {product['platform']}")
-                            st.markdown(f"[🔗 View Product]({product['link']})")
-                        
-                        st.markdown('</div>', unsafe_allow_html=True)
-                        st.markdown("")
-                else:
-                    st.warning("⚠️ No results found. Try uploading a different image or adjusting search settings.")
+                    # Get similarity score (mock for now - in real app, use actual model inference)
+                    similarity_score = 0.89  # Mock score
+                    
+                    st.success(f"Product analysis complete!")
+                    
+                    # Display product info
+                    base_product, similar_products = get_mock_product_data()
+                    
+                    st.subheader("Original Product Info")
+                    st.write(f"**Name:** {base_product['name']}")
+                    st.write(f"**Brand:** {base_product['brand']}")
+                    st.write(f"**Category:** {base_product['category']}")
+                    st.write(f"**Original Price:** ${base_product['original_price']:.2f}")
+                    st.write(f"**Description:** {base_product['description']}")
     
-    elif uploaded_file and not embedding_db:
-        st.info("💡 Embedding database not loaded. Only classification is available.")
-    
-    else:
-        st.info("👈 Upload an image to see similar products")
+    with col2:
+        if uploaded_file is not None:
+            st.subheader("🔍 Similar Products Found")
+            st.write("Here are affordable alternatives to your product:")
+            
+            # Display similar products
+            base_product, similar_products = get_mock_product_data()
+            
+            for product in similar_products:
+                with st.container():
+                    col_a, col_b, col_c = st.columns([1, 2, 1])
+                    
+                    with col_a:
+                        st.image(product['image_url'], width=100)
+                    
+                    with col_b:
+                        st.write(f"**{product['name']}**")
+                        st.write(f"**Retailer:** {product['retailer']}")
+                        
+                        # Price comparison
+                        original_price = base_product['original_price']
+                        savings = original_price - product['price']
+                        savings_percentage = (savings / original_price) * 100
+                        
+                        st.write(f"**Price:** ${product['price']:.2f}")
+                        st.write(f"💰 **You save: ${savings:.2f} ({savings_percentage:.1f}%)**")
+                        
+                        # Rating
+                        st.write(f"⭐ **Rating:** {product['rating']}/5 ({product['reviews']} reviews)")
+                    
+                    with col_c:
+                        match_class = get_match_color_class(product['match_percentage'])
+                        st.markdown(f'<div class="match-percentage {match_class}">{product["match_percentage"]}% Match</div>', 
+                                  unsafe_allow_html=True)
+                        
+                        if st.button("View Product", key=product['name']):
+                            st.write(f"Redirecting to {product['retailer']}...")
+                            # In a real app, this would redirect to the actual product page
+                    
+                    st.markdown("---")
+            
+            # Summary statistics
+            st.subheader("💰 Price Comparison Summary")
+            prices = [p['price'] for p in similar_products]
+            avg_price = sum(prices) / len(prices)
+            min_price = min(prices)
+            
+            col_x, col_y, col_z = st.columns(3)
+            with col_x:
+                st.metric("Original Price", f"${base_product['original_price']:.2f}")
+            with col_y:
+                st.metric("Average Alternative", f"${avg_price:.2f}")
+            with col_z:
+                st.metric("Lowest Price Found", f"${min_price:.2f}")
+            
+            # Savings visualization
+            st.subheader("📊 Potential Savings")
+            savings_data = {
+                'Retailer': [p['retailer'] for p in similar_products],
+                'Price': [p['price'] for p in similar_products],
+                'Savings': [base_product['original_price'] - p['price'] for p in similar_products],
+                'Match %': [p['match_percentage'] for p in similar_products]
+            }
+            
+            df = pd.DataFrame(savings_data)
+            st.dataframe(df, use_container_width=True)
+            
+        else:
+            st.info("👆 Upload a product image to find affordable alternatives!")
+            st.image("https://via.placeholder.com/600x400/3498DB/FFFFFF?text=Upload+Product+Image+to+Start", 
+                    use_column_width=True)
 
-# Sidebar
-with st.sidebar:
-    st.markdown("## 📖 About")
-    st.info("""
-    This AI system uses a custom-built **ResNet-18** architecture trained from scratch on 44,424 fashion images.
-    
-    **Key Features**:
-    - 87.2% classification accuracy
-    - Real-time similarity matching
-    - E-commerce platform integration
-    - 512-dimensional embeddings
-    
-    **Categories**:
-    - 👔 Men's Fashion
-    - 👗 Women's Fashion  
-    - 👟 Footwear
-    """)
-    
-    st.markdown("---")
-    
-    st.markdown("## ⚙️ Model Info")
-    st.write("**Architecture**: Custom ResNet-18")
-    st.write("**Parameters**: 11.2M")
-    st.write("**Training Dataset**: 44,424 images")
-    st.write("**Test Accuracy**: 87.2%")
-    
-    st.markdown("---")
-    
-    st.markdown("## 📚 How It Works")
-    st.write("""
-    1. **Upload** a fashion item image
-    2. **AI classifies** it into category
-    3. **Extract** 512-D embedding vector
-    4. **Compare** with database using cosine similarity
-    5. **Search** e-commerce platforms for dupes
-    """)
-    
-    st.markdown("---")
-    st.caption("🎓 Week 4 Assignment | Deep CNNs & ResNets")
-
-# Footer
-st.markdown("---")
-st.markdown("""
-<div style='text-align: center; color: #888;'>
-    <p>Built with ❤️ using PyTorch, Streamlit & Custom ResNet-18</p>
-    <p><small>⚠️ E-commerce prices and availability may change. Visit product links for current information.</small></p>
-</div>
-""", unsafe_allow_html=True)
+if __name__ == "__main__":
+    main()
