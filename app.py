@@ -1,7 +1,6 @@
 import streamlit as st
 import numpy as np
 from PIL import Image
-import matplotlib.pyplot as plt
 
 # Set page config first
 st.set_page_config(
@@ -58,24 +57,20 @@ with tab1:
             st.success(f"**Predicted Category:** {category.upper()}")
             st.info(f"**Confidence:** {confidence:.1%}")
             
-            # Show confidence bars
+            # Show confidence bars using Streamlit native components
+            st.subheader("Classification Confidence")
+            
             categories = ['footwear', 'men', 'women']
-            confidences = [0.1, 0.2, 0.7] if category == 'women' else \
-                         [0.7, 0.2, 0.1] if category == 'footwear' else \
-                         [0.2, 0.7, 0.1]
+            if category == 'women':
+                confidences = [10, 20, 70]
+            elif category == 'footwear':
+                confidences = [70, 20, 10]
+            else:  # men
+                confidences = [20, 70, 10]
             
-            fig, ax = plt.subplots(figsize=(8, 3))
-            bars = ax.barh(categories, [c * 100 for c in confidences], color=['#FF6B6B', '#4ECDC4', '#45B7D1'])
-            ax.set_xlim(0, 100)
-            ax.set_xlabel('Confidence (%)')
-            ax.set_title('Classification Probabilities')
-            
-            for bar, conf in zip(bars, confidences):
-                width = bar.get_width()
-                ax.text(width + 1, bar.get_y() + bar.get_height()/2, f'{conf*100:.1f}%', 
-                       va='center', fontweight='bold')
-            
-            st.pyplot(fig)
+            for cat, conf in zip(categories, confidences):
+                st.write(f"**{cat.upper()}**: {conf}%")
+                st.progress(conf / 100)
 
 with tab2:
     st.header("Detect Duplicate Items")
@@ -98,7 +93,8 @@ with tab2:
         if st.button("🔍 Compare Images", type="primary"):
             with st.spinner("Comparing images..."):
                 similarity = calculate_similarity(img1, img2)
-                is_dupe = similarity >= (threshold / 100)
+                similarity_percent = similarity * 100
+                is_dupe = similarity_percent >= threshold
                 
                 col1, col2, col3 = st.columns(3)
                 
@@ -107,18 +103,26 @@ with tab2:
                     st.metric("Item 1 Category", cat1.upper(), f"{conf1:.1%}")
                 
                 with col2:
-                    st.metric("Similarity", f"{similarity:.1%}", 
+                    st.metric("Similarity", f"{similarity_percent:.1f}%", 
                              "DUPE! ✅" if is_dupe else "Not Dupe ❌")
                 
                 with col3:
                     cat2, conf2 = classify_image(Image.open(img2))
                     st.metric("Item 2 Category", cat2.upper(), f"{conf2:.1%}")
                 
+                # Visual similarity gauge using native Streamlit
+                st.subheader("Similarity Gauge")
+                st.write(f"Current similarity: **{similarity_percent:.1f}%**")
+                st.write(f"Threshold: **{threshold}%**")
+                
+                # Create a simple gauge using progress bar
                 if is_dupe:
-                    st.success(f"🎯 **DUPE DETECTED!** {similarity:.1%} similarity (above {threshold}% threshold)")
+                    st.progress(similarity_percent / 100)
+                    st.success(f"🎯 **DUPE DETECTED!** {similarity_percent:.1f}% similarity (above {threshold}% threshold)")
                     st.balloons()
                 else:
-                    st.warning(f"⚠️ **Not a dupe.** {similarity:.1%} similarity (below {threshold}% threshold)")
+                    st.progress(similarity_percent / 100)
+                    st.warning(f"⚠️ **Not a dupe.** {similarity_percent:.1f}% similarity (below {threshold}% threshold)")
 
 st.markdown("---")
 st.caption("Fashion Dupe Detection Demo | Built with Streamlit")
